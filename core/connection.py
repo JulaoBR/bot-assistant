@@ -1,5 +1,6 @@
-from decouple import config
 import pymysql
+
+from decouple import config
 from pymysql.cursors import DictCursor
 
 DB_CONFIG = {
