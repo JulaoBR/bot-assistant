@@ -2,6 +2,7 @@ import json
 import os
 import logging
 
+from datetime import datetime, timedelta, timezone
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, ConversationHandler, filters
 from decouple import config
@@ -10,13 +11,15 @@ from models.despesa_model import DespesaModel
 from models.despesa_parcela_model import DespesaParcelaModel
 from models.categoria_model import CategoriaModel
 
+from utils.number_utils import transformar_valor_bra_to_eua
+
 logging.basicConfig(level=logging.DEBUG)
 
 # Carregar o token do .env
 TOKEN_BOT = config("TELEGRAM_BOT_TOKEN")
 
 # Estados da Conversação
-DATA_LANCAMENTO, DESCRICAO, CATEGORIA, DATA_PAGAMENTO, VALOR_TOTAL, PARCELAS, CARTAO, OBSERVACAO, CONFIRMAR = range(9)
+DATA_LANCAMENTO, DESCRICAO, CATEGORIA, DATA_VENCIMENTO, VALOR_TOTAL, PARCELAS, CARTAO, OBSERVACAO, CONFIRMAR = range(9)
 
 # Teclado com opções fixas (exemplo para categorias e cartões)
 CATEGORIAS = [["Alimentação", "Transporte", "Lazer"], ["Saúde", "Educação", "Outros"]]
@@ -50,11 +53,11 @@ async def receber_descricao(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receber_categoria(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["categoria"] = update.message.text
-    await update.message.reply_text("📆 Informe a **Data para Pagamento** (Formato: DD/MM/AAAA):")
-    return DATA_PAGAMENTO
+    await update.message.reply_text("📆 Informe a **Data para Vencimento** (Formato: DD/MM/AAAA):")
+    return DATA_VENCIMENTO
 
-async def receber_data_pagamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["data_pagamento"] = update.message.text
+async def receber_data_vencimento(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["data_vencimento"] = update.message.text
     await update.message.reply_text("💰 Informe o **Valor Total da Despesa**:")
     return VALOR_TOTAL
 
@@ -71,7 +74,7 @@ async def receber_observacao(update: Update, context: ContextTypes.DEFAULT_TYPE)
             📅 Data de Lançamento: {context.user_data["data_lancamento"]}
             ✍️ Descrição: {context.user_data["descricao"]}
             📂 Categoria: {context.user_data["categoria"]}
-            📆 Data para Pagamento: {context.user_data["data_pagamento"]}
+            📆 Data para Vencimento: {context.user_data["data_vencimento"]}
             💰 Valor Total: {context.user_data["valor_total"]}
             📝 Observação: {context.user_data["observacao"]}
             """
@@ -82,16 +85,26 @@ async def receber_observacao(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def confirmar_lancamento(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text.lower() == "sim":
         try:
+            data_lancamento = datetime.strptime(context.user_data["data_lancamento"], "%d/%m/%Y").strftime("%Y-%m-%d")
+            data_vencimento = datetime.strptime(context.user_data["data_vencimento"], "%d/%m/%Y").strftime("%Y-%m-%d")
+            competencia = datetime.strptime(context.user_data["data_vencimento"], "%d/%m/%Y").strftime("%Y-%m")
+            
+            valor_despesa = transformar_valor_bra_to_eua(context.user_data["valor_total"])
+            
+            # Definir o fuso horário UTC-3
+            fuso_horario = timezone(timedelta(hours=-3))
+            data_hora_atual = datetime.now(fuso_horario)
+            
             # Inicia a transação
             with DespesaModel() as model_despesa, DespesaParcelaModel() as model_parcela:
                 iddespesa = model_despesa.inserir({
                     "idusuario": 5,
                     "idcartao": 0, 
                     "idcategoria": 0,
-                    "valor": context.user_data["valor_total"],
+                    "valor": valor_despesa,
                     "descricao": context.user_data["descricao"],
                     "observacao": context.user_data["observacao"],
-                    "dataDespesa": context.user_data["data_lancamento"],
+                    "dataDespesa": data_lancamento,
                     "dataHoraCadastro": data_hora_atual.strftime("%Y-%m-%d %H:%M:%S"),
                     "dataHoraAlteracao": data_hora_atual.strftime("%Y-%m-%d %H:%M:%S")
                 })
@@ -99,20 +112,21 @@ async def confirmar_lancamento(update: Update, context: ContextTypes.DEFAULT_TYP
                 model_parcela.inserir({
                     "iddespesa": iddespesa,
                     "numero": '1/1',
-                    "valorParcela": context.user_data["valor_total"],
+                    "valorParcela": valor_despesa,
                     "desconto": 0.00,
                     "acrescimo": 0.00,
-                    "dataVencimento": context.user_data["data_pagamento"],
-                    "competencia": f"{ano}-{mes}",
+                    "dataVencimento": data_vencimento,
+                    "competencia": competencia,
                     "status": 0,
-                    "evento": 'F',
-                    "origem_importacao": json.dumps(origem, ensure_ascii=False, indent=4)
+                    "evento": 'F'
                 })
             
                 await update.message.reply_text("✅ Despesa lançada com sucesso!")
 
         except Exception as e:
             await update.message.reply_text(f"❌ Erro ao lançar despesa: {e}")
+        except ValueError:
+            await update.message.reply_text(f"❌ Formato de data inválido: {e}")
     else:
         await update.message.reply_text("🚫 Lançamento cancelado.")
     
@@ -135,7 +149,7 @@ def main() -> None:
             DATA_LANCAMENTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_lancamento)],
             DESCRICAO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_descricao)],
             CATEGORIA: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_categoria)],
-            DATA_PAGAMENTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_pagamento)],
+            DATA_VENCIMENTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_data_vencimento)],
             VALOR_TOTAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_valor_total)],
             OBSERVACAO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_observacao)],
             CONFIRMAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirmar_lancamento)]
